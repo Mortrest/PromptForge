@@ -8,7 +8,8 @@ import tqdm
 import logging
 import os
 from typing import List, Tuple, Dict, Set, Optional
-
+import argparse
+import json
 
 class Generator:
     """
@@ -147,7 +148,9 @@ class Generator:
         for word in self.anchor_words:
             token_id = self.tokenizer.encode(" " + word, add_special_tokens=False)[0]
             with torch.no_grad():
-                anchor_embedding = self.model.transformer.wte.weight[token_id].clone()
+                # anchor_embedding = self.model.transformer.wte.weight[token_id].clone()
+                anchor_embedding = self.model.model.embed_tokens.weight[token_id].clone()
+
             self.anchor_embeddings.append(anchor_embedding.to(self.device))
         
         print("Initialized placeholder soft prompt")
@@ -157,7 +160,7 @@ class Generator:
         Initialize the soft prompt using the average of the first k tokens from reference stories,
         where k is the soft_prompt_length.
         """
-        print(f"Initializing soft prompt using first {self.soft_prompt_length} tokens from reference stories...")
+        print(f"\nInitializing soft prompt using first {self.soft_prompt_length} tokens from reference stories...")
         
         # Check if we have reference stories
         if len(self.reference_stories) == 0:
@@ -181,7 +184,8 @@ class Generator:
                     if i >= self.soft_prompt_length:
                         break
                     # Get embedding from model
-                    token_embedding = self.model.transformer.wte.weight[token_id].clone()
+                    # token_embedding = self.model.transformer.wte.weight[token_id].clone()
+                    token_embedding = self.model.model.embed_tokens.weight[token_id].clone()
                     position_token_embeddings[i].append(token_embedding)
         
         # Calculate average embedding for each position
@@ -256,13 +260,37 @@ class Generator:
         """
         # Tokenize hard prompt
         hard_prompt_ids = self.tokenizer.encode(self.hard_prompt, return_tensors="pt").to(self.device)
-        
+    
         # Get model embeddings for hard prompt
         with torch.no_grad():
-            hard_prompt_embeds = self.model.transformer.wte(hard_prompt_ids)
+            # hard_prompt_embeds = self.model.transformer.wte(hard_prompt_ids)
+            hard_prompt_embeds = self.model.model.embed_tokens(hard_prompt_ids)
             
+
+        ## verification code
+        decoded_from_ids = self.tokenizer.decode(hard_prompt_ids[0], skip_special_tokens=True)
+        # print("\n\nhard_prompt decoded from hard_prompt_ids:")
+        print(decoded_from_ids)
+
+        embedding_table = self.model.model.embed_tokens.weight  # shape: (vocab_size, hidden_dim)
+        embedding_table_norm = F.normalize(embedding_table, dim=1)
+        embeds_norm = F.normalize(hard_prompt_embeds[0], dim=1)
+        similarities = torch.matmul(embeds_norm, embedding_table_norm.T)  # shape: (seq_len, vocab_size)
+        nearest_ids = similarities.argmax(dim=1)
+        decoded_from_embeddings = self.tokenizer.decode(nearest_ids, skip_special_tokens=True)
+        # print("\nhard_prompt decoded from hard_prompt_embeds:")
+        print(decoded_from_embeddings)
+
+
         # Concat soft prompt and hard prompt embeddings
         input_embeds = torch.cat([self.soft_prompt.unsqueeze(0), hard_prompt_embeds], dim=1)
+
+        embeds_norm = F.normalize(input_embeds[0], dim=1)
+        similarities = torch.matmul(embeds_norm, embedding_table_norm.T)  # shape: (seq_len, vocab_size)
+        nearest_ids = similarities.argmax(dim=1)
+        decoded_from_embeddings = self.tokenizer.decode(nearest_ids, skip_special_tokens=True)
+        # print("\nTotal concatenated (soft+hard) prompt decoded from input_embeds:")
+        print(decoded_from_embeddings)
         
         # Create attention mask
         attention_mask = torch.ones(1, input_embeds.size(1), dtype=torch.long, device=self.device)
@@ -270,7 +298,7 @@ class Generator:
         # Generate candidate stories
         candidates = []
         
-        for _ in range(self.batch_size):
+        for _ in range(self.batch_size):    
             try:
                 with torch.no_grad():
                     outputs = self.model.generate(
@@ -289,10 +317,28 @@ class Generator:
                     )
                     
                     # Extract the generated token IDs (skip the initial input tokens)
-                    generated_ids = outputs.sequences[0][input_embeds.size(1):]
+                    # generated_ids = outputs.sequences[0][input_embeds.size(1):]
+                    generated_ids = outputs.sequences[0][:]
                     
                     # Decode to text
                     story = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+                    # print("\n" + "="*150)
+                    # print("📝 FULL GENERATED OUTPUT (including prompt):")
+                    # print("="*150)
+                    # print(self.tokenizer.decode(outputs.sequences[0][:], skip_special_tokens=True))
+
+                    # print("\n" + "="*150)
+                    # print("🧠 EXTRACTED STORY (model's generated part only):")
+                    # print("="*150)
+                    # print(story)
+
+                    # print("\n" + "="*150)
+                    # print("📏 LENGTH OF input_embeds:")
+                    # print("="*150)
+                    # print(input_embeds.size(1))
+                    # print("="*150 + "\n")
+
                     
                     if story.strip():  # Only add non-empty texts
                         candidates.append(story)
@@ -408,7 +454,9 @@ class Generator:
             for story in self.reference_stories:
                 # Get hard prompt embeddings
                 hard_prompt_ids = self.tokenizer.encode(self.hard_prompt, return_tensors="pt").to(self.device)
-                hard_prompt_embeds = self.model.transformer.wte(hard_prompt_ids)
+                # hard_prompt_embeds = self.model.transformer.wte(hard_prompt_ids)
+                hard_prompt_embeds = self.model.model.embed_tokens(hard_prompt_ids)
+
                 
                 # Combine with soft prompt
                 input_embeds = torch.cat([self.soft_prompt.unsqueeze(0), hard_prompt_embeds], dim=1)
@@ -443,7 +491,9 @@ class Generator:
             for story in recent_selected:
                 # Get hard prompt embeddings
                 hard_prompt_ids = self.tokenizer.encode(self.hard_prompt, return_tensors="pt").to(self.device)
-                hard_prompt_embeds = self.model.transformer.wte(hard_prompt_ids)
+                # hard_prompt_embeds = self.model.transformer.wte(hard_prompt_ids)
+                hard_prompt_embeds = self.model.model.embed_tokens(hard_prompt_ids)
+
                 
                 # Combine with soft prompt
                 input_embeds = torch.cat([self.soft_prompt.unsqueeze(0), hard_prompt_embeds], dim=1)
@@ -547,21 +597,29 @@ class Generator:
             if (i + 1) % self.update_frequency == 0:
                 self.update_soft_prompt()
         
-        print(f"Saving {len(self.selected_stories)} stories to {output_file}...")
-        
+
+        print(f"Saving {len(self.selected_stories)} selected stories and {len(self.reference_stories)} reference stories to {output_file}...")
+
         try:
+            # Ensure the output directory exists
             os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-            
+
+            # Prepare the data to be saved
+            data = {
+                "selected_stories": self.selected_stories,
+                "reference_stories": self.reference_stories
+            }
+
+            # Write the data to a JSON file
             with open(output_file, 'w', encoding='utf-8') as f:
-                for i, story in enumerate(self.selected_stories):
-                    f.write(f"=== Story {i+1} ===\n")
-                    f.write(story + '\n\n')
-                    
+                json.dump(data, f, ensure_ascii=False, indent=4)  # Use indentation for easy readability
+
             print(f"Successfully saved stories to {output_file}")
-            
+
         except Exception as e:
-            print(f"Error saving stories: {e}")
-    
+            print(f"An error occurred while saving the stories: {e}")
+
+
     def visualize_soft_prompt(self):
         """
         Visualize the soft prompt by finding the closest words in vocabulary.
@@ -584,7 +642,9 @@ class Generator:
             List of closest word matches
         """
         with torch.no_grad():
-            embedding_matrix = self.model.transformer.wte.weight
+            # embedding_matrix = self.model.transformer.wte.weight
+            embedding_matrix = self.model.model.embed_tokens.weight
+
             
             embedding = embedding.to(embedding_matrix.device)
             cos_similarities = F.cosine_similarity(embedding.unsqueeze(0), embedding_matrix, dim=1)
@@ -599,30 +659,74 @@ class Generator:
             return closest_words
 
 
+def sanitize_filename(filename):
+    # Replace spaces and other special characters with underscores
+    return filename.replace(" ", "_").replace(":", "-").replace("/", "_").replace("\\", "_")
+
+
 if __name__ == "__main__":
     try:
+        # Setting up command line argument parsing
+        parser = argparse.ArgumentParser(description="Knight Story Generator")
+        
+        # Adding arguments to parser
+        parser.add_argument('--model_name', type=str, default="/cos/models/Llama-3.1-8B-Instruct/", help="Path to the model")
+        parser.add_argument('--soft_prompt_length', type=int, default=5, help="Length of soft prompt")
+        parser.add_argument('--batch_size', type=int, default=10, help="Batch size")
+        parser.add_argument('--max_length', type=int, default=512, help="Max length of generated text")
+        parser.add_argument('--diversity_weight', type=float, default=0.7, help="Diversity weight for generation")
+        parser.add_argument('--num_reference_stories', type=int, default=20, help="Number of reference stories")
+        parser.add_argument('--update_frequency', type=int, default=5, help="Update frequency")
+        parser.add_argument('--learning_rate', type=float, default=0.005, help="Learning rate")
+        parser.add_argument('--num_stories', type=int, default=50, help="Number of stories to generate")
+        parser.add_argument('--output_file', type=str, default=None, help="Output file for saving stories")
+
+        args = parser.parse_args()
+
+        filename = "knight_stories_model_{model_name}_sp_{soft_prompt_length}_bsz_{batch_size}_maxlen_{max_length}_div_{diversity_weight}_ref_{num_reference_stories}_freq_{update_frequency}_lr_{learning_rate}_stories_{num_stories}.txt".format(
+            model_name=args.model_name,
+            soft_prompt_length=args.soft_prompt_length,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
+            diversity_weight=args.diversity_weight,
+            num_reference_stories=args.num_reference_stories,
+            update_frequency=args.update_frequency,
+            learning_rate=args.learning_rate,
+            num_stories=args.num_stories
+        )
+
+        filename = sanitize_filename(filename)
+
+        if args.output_file is None:
+            args.output_file = f"/cos/Mitigator_training/mom_in_a_bus/code_promptforge/saved_data/outputs/{filename}"
+
+        print("\nHyperparameters:\n" + "\n".join([f"{key.replace('_', ' ').title()}: {value}" for key, value in vars(args).items()]))
+
         generator = Generator(
-            model_name="gpt2-medium",
-            soft_prompt_length=5,  # Slightly shorter for more focused prompts
-            batch_size=10,
-            max_length=300,
-            diversity_weight=0.7,
-            num_reference_stories=20,
-            update_frequency=5,
-            learning_rate=0.005  # Reduced learning rate for careful updates
+            model_name=args.model_name,
+            soft_prompt_length=args.soft_prompt_length,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
+            diversity_weight=args.diversity_weight,
+            num_reference_stories=args.num_reference_stories,
+            update_frequency=args.update_frequency,
+            learning_rate=args.learning_rate
         )
-        
+
+        # Generating stories and saving them to the specified file
         generator.generate_stories(
-            num_stories=50,  # Reduced for testing
-            output_file="outputs/knight_stories.txt"
+            num_stories=args.num_stories,
+            output_file=args.output_file
         )
-        
+
         print("\n=== Final Soft Prompt ===")
         generator.visualize_soft_prompt()
-        
+
         print("\nSuccessfully generated knight stories!")
-        
+
     except Exception as e:
         import traceback
         print(f"Error running Knight Story Generator: {e}")
         traceback.print_exc()
+
+
